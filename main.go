@@ -3,13 +3,13 @@ package main
 import (
 	"bufio"
 	"fmt"
-	"io/ioutil"
+	"io"
 	"net/http"
 	"os"
 	"strings"
+	"sync"
 )
 
-// Payloads with unique markers to identify the template engine
 var payloads = map[string]string{
 	"{{7*7}}":             "49", // Jinja2, Twig
 	"${{7*7}}":            "49", // Go templates
@@ -20,7 +20,7 @@ var payloads = map[string]string{
 	"#{7*7}":              "49", // Thymeleaf
 }
 
-// Mapping payloads to their respective template engines (unchanged)
+// Mapping payloads to their respective template engines
 var templateEngines = map[string]string{
 	"{{7*7}}":             "Jinja2, Twig",
 	"${{7*7}}":            "Go templates",
@@ -32,35 +32,55 @@ var templateEngines = map[string]string{
 }
 
 func main() {
-
-	// Get the target URL from user input (unchanged)
+	font_logo := `
+████████╗███████╗███╗   ███╗██████╗ ██╗      █████╗ ██████╗ 
+╚══██╔══╝██╔════╝████╗ ████║██╔══██╗██║     ██╔══██╗██╔══██╗
+   ██║   █████╗  ██╔████╔██║██████╔╝██║     ███████║██████╔╝
+   ██║   ██╔══╝  ██║╚██╔╝██║██╔═══╝ ██║     ██╔══██║██╔══██╗
+   ██║   ███████╗██║ ╚═╝ ██║██║     ███████╗██║  ██║██║  ██║
+   ╚═╝   ╚══════╝╚═╝     ╚═╝╚═╝     ╚══════╝╚═╝  ╚═╝╚═╝  ╚═╝
+                                                 ~ 0xSurya`
 	reader := bufio.NewReader(os.Stdin)
-	fmt.Print("Enter the target URL🔗: ")
+	fmt.Println(font_logo)
+	fmt.Print("Enter the target URL 🗡️:")
 	url, _ := reader.ReadString('\n')
 	url = strings.TrimSpace(url)
 
-	fmt.Print("Enter the parameter to test (e.g., input): ")
-	param, _ := reader.ReadString('\n')
-	param = strings.TrimSpace(param)
+	if !strings.Contains(url, "fuzz") {
+		fmt.Println("Error: URL must contain 'fuzz' param")
+		return
+	}
 
 	// Check SSTI for each payload and identify the template engine
 	vulnerable := false
+	var wg sync.WaitGroup
+	results := make(chan string, len(payloads))
+
 	for payload, expected := range payloads {
-		if result, engine := checkSSTI(url, param, payload, expected); result != "" {
-			vulnerable = true
-			fmt.Printf("Potential SSTI detected with payload '%s'.\n", payload)
-			fmt.Printf("Vulnerable URL: %s\n", result)
-			fmt.Printf("Likely template engine(s): %s\n", engine)
-		}
+		wg.Add(1)
+		go func(payload, expected string) {
+			defer wg.Done()
+			if result, engine := checkSSTI(url, payload, expected); result != "" {
+				vulnerable = true
+				results <- fmt.Sprintf("Potential SSTI detected with payload '%s'.\nVulnerable URL✅: %s\nLikely template engine(s)💯: %s\n", payload, result, engine)
+			}
+		}(payload, expected)
 	}
 
-	if !vulnerable {
-		fmt.Println("The target does not appear to be vulnerable to SSTI.")
+	wg.Wait()
+	close(results)
+
+	if vulnerable {
+		for res := range results {
+			fmt.Println(res)
+		}
+	} else {
+		fmt.Println("The target does not appear to be vulnerable to SSTI💀")
 	}
 }
 
-func checkSSTI(url, param, payload, expected string) (string, string) {
-	fullURL := fmt.Sprintf("%s?%s=%s", url, param, payload)
+func checkSSTI(url, payload, expected string) (string, string) {
+	fullURL := strings.Replace(url, "fuzz", payload, -1)
 	resp, err := http.Get(fullURL)
 	if err != nil {
 		fmt.Println("Error:", err)
@@ -68,14 +88,15 @@ func checkSSTI(url, param, payload, expected string) (string, string) {
 	}
 	defer resp.Body.Close()
 
-	body, err := ioutil.ReadAll(resp.Body)
+	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		fmt.Println("Error reading response:", err)
 		return "", ""
 	}
 
 	bodyStr := string(body)
-	if strings.Contains(bodyStr, expected) {
+	// Check if the response contains the expected output but not the payload
+	if strings.Contains(bodyStr, expected) && !strings.Contains(bodyStr, payload) {
 		engine := templateEngines[payload]
 		return fullURL, engine
 	}
